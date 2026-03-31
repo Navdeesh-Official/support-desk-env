@@ -1,0 +1,8 @@
+spec_version: 1
+name: support_desk_env
+version: "1.0.0"
+description: "B2B SaaS support ticket resolution environment for agentic RL training"
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
