@@ -23,12 +23,22 @@ def check_inference_script():
             return False, "inference.py doesn't use the OpenAI Client"
     return True, "inference.py looks good"
 
+def check_pyproject_toml():
+    if not os.path.exists("pyproject.toml"):
+        return False, "pyproject.toml is missing from root directory"
+    with open("pyproject.toml", "r") as f:
+        content = f.read()
+        if "[project]" not in content:
+            return False, "pyproject.toml is malformed"
+    return True, "pyproject.toml looks good"
+
 def run_tests():
     passed = True
     print("--- Running Validations ---")
     tests = [
         check_openenv_yaml,
         check_inference_script,
+        check_pyproject_toml,
     ]
     for test in tests:
         res, msg = test()

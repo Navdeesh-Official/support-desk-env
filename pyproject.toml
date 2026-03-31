@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "support-desk-env"
+version = "1.0.0"
+description = "B2B SaaS support ticket resolution environment for agentic RL training"
+authors = [
+    {name = "Navdeesh", email = "navdeeshsinghal1@gmail.com"},
+]
+dependencies = [
+    "openenv-core>=1.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
+    "openai>=1.0.0",
+    "mistralai>=0.0.12"
+]
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.urls]
+Homepage = "https://github.com/Navdeesh-Official/support-desk-env"
