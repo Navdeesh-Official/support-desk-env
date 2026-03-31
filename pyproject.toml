@@ -24,4 +24,4 @@ requires-python = ">=3.10"
 Homepage = "https://github.com/Navdeesh-Official/support-desk-env"
 
 [project.scripts]
-openenv = "server.app:main"
+server = "server.app:main"
