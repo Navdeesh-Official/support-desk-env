@@ -10,7 +10,7 @@ authors = [
     {name = "Navdeesh", email = "navdeeshsinghal1@gmail.com"},
 ]
 dependencies = [
-    "openenv-core>=1.0.0",
+    "openenv-core",
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
     "pydantic>=2.0.0",
@@ -18,7 +18,10 @@ dependencies = [
     "mistralai>=0.0.12"
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.urls]
 Homepage = "https://github.com/Navdeesh-Official/support-desk-env"
+
+[project.scripts]
+openenv = "server.app:main"

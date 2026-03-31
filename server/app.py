@@ -192,3 +192,10 @@ def _run_rule_baseline(task_id: str) -> float:
             break
 
     return obs.reward or 0.0
+
+def main() -> None:
+    import uvicorn
+    uvicorn.run("server.app:app", host="0.0.0.0", port=8000)
+
+if __name__ == "__main__":
+    main()
