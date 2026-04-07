@@ -1,192 +1,251 @@
-"""OpenAI baseline agent for SupportDeskEnv serving as inference.py.
-
-Requires environment variables:
-- API_BASE_URL
-- MODEL_NAME
-- HF_TOKEN
-"""
+"""OpenAI baseline agent for SupportDeskEnv serving as inference.py."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import sys
 from typing import Any
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+    OPENAI_IMPORT_ERROR: Exception | None = None
+except Exception as e:
+    OpenAI = None  # type: ignore[assignment]
+    OPENAI_IMPORT_ERROR = e
 
-from environment import SupportDeskEnv
-from fixtures import TASK_IDS
-from models import SupportAction
+DEFAULT_TASK_IDS = ["access_reset"]
+
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 SYSTEM_PROMPT = """\
 You are a B2B SaaS support agent. You receive a customer ticket and must resolve it.
 
 Available actions (respond with EXACTLY one JSON object per turn):
-- {"action_type": "view_account", "account_id": "ACC-XXXX"} — look up account info
-- {"action_type": "view_billing", "billing_account_id": "ACC-XXXX"} — look up billing data
-- {"action_type": "view_health", "service_name": "SERVICE"} — check service health status
-- {"action_type": "search_kb", "query": "SEARCH TERMS"} — search knowledge base
-- {"action_type": "classify_ticket", "classification": "access|billing|outage|general"} — classify
-- {"action_type": "set_priority", "priority": "low|medium|high|critical"} — set priority
-- {"action_type": "route_ticket", "route_to": "l1_support|l2_support|billing_team|engineering"} — route
-- {"action_type": "draft_reply", "reply_text": "YOUR REPLY HERE"} — draft customer reply
-- {"action_type": "resolve_ticket", "resolution_code": "resolved|escalated|closed"} — resolve and end
+- {"action_type": "view_account", "account_id": "ACC-XXXX"}
+- {"action_type": "view_billing", "billing_account_id": "ACC-XXXX"}
+- {"action_type": "view_health", "service_name": "SERVICE"}
+- {"action_type": "search_kb", "query": "SEARCH TERMS"}
+- {"action_type": "classify_ticket", "classification": "access|billing|outage|general"}
+- {"action_type": "set_priority", "priority": "low|medium|high|critical"}
+- {"action_type": "route_ticket", "route_to": "l1_support|l2_support|billing_team|engineering"}
+- {"action_type": "draft_reply", "reply_text": "YOUR REPLY HERE"}
+- {"action_type": "resolve_ticket", "resolution_code": "resolved|escalated|closed"}
 
 Rules:
-1. Investigate before acting. Use view_account, view_billing, view_health, search_kb to gather info.
-2. Classify, set priority, and route the ticket based on evidence.
-3. Draft a professional reply that addresses the customer's issue with facts from your investigation.
-4. Resolve the ticket when done.
-5. Respond with ONLY the JSON action object. No markdown, no explanation.
+1. Investigate before acting.
+2. Respond with ONLY the JSON action object.
 """
 
 
-def run_baseline(
-    task_id: str = "access_reset",
-) -> dict[str, Any]:
+def _error_result(task_id: str, message: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "task_id": task_id,
+        "model": MODEL_NAME,
+        "message": message,
+        "score": 0.0,
+        "steps": 0,
+        "grade": None,
+    }
+
+
+def _format_thread(thread: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for msg in thread:
+        role = str(msg.get("role", "system")).upper()
+        sender = str(msg.get("sender", "System"))
+        text = str(msg.get("message", ""))
+        parts.append(f"[{role}] {sender}: {text}")
+    return "\n\n".join(parts)
+
+
+def _format_observation(obs: Any, step: int) -> str:
+    lines = [f"Step {step}: {getattr(obs, 'status_message', '')}"]
+    latest_tool_result = getattr(obs, "latest_tool_result", None)
+    if latest_tool_result:
+        lines.append(f"Tool result: {json.dumps(latest_tool_result, indent=2)[:1000]}")
+    retrieved_artifacts = getattr(obs, "retrieved_artifacts", None)
+    if retrieved_artifacts:
+        lines.append(f"Retrieved: {', '.join(retrieved_artifacts)}")
+    current_classification = getattr(obs, "current_classification", None)
+    if current_classification:
+        lines.append(f"Classification: {current_classification}")
+    current_priority = getattr(obs, "current_priority", None)
+    if current_priority:
+        lines.append(f"Priority: {current_priority}")
+    current_route = getattr(obs, "current_route", None)
+    if current_route:
+        lines.append(f"Route: {current_route}")
+    return "\n".join(lines)
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        lines = [line for line in candidate.split("\n") if not line.strip().startswith("```")]
+        candidate = "\n".join(lines)
+    parsed = json.loads(candidate)
+    if not isinstance(parsed, dict):
+        raise ValueError("Model response must be a JSON object")
+    return parsed
+
+
+def run_baseline(task_id: str = "access_reset") -> dict[str, Any]:
     """Run the OpenAI baseline on a single task and return results."""
-    
-    # Required Hackathon Context variables
-    api_base_url = os.environ.get("API_BASE_URL")
-    model_name = os.environ.get("MODEL_NAME")
-    hf_token = os.environ.get("HF_TOKEN")
+    if not task_id or not isinstance(task_id, str):
+        return _error_result("invalid_task", "Invalid task_id input")
 
-    if not all([api_base_url, model_name, hf_token]):
-        print("WARNING: API_BASE_URL, MODEL_NAME, or HF_TOKEN environment variables not set. Ensuring compliance might fail.", file=sys.stderr)
-    
-    client = OpenAI(
-        base_url=api_base_url,
-        api_key=hf_token or "sk-dummy"
-    )
+    if OPENAI_IMPORT_ERROR is not None:
+        return _error_result(task_id, f"OpenAI import failed: {OPENAI_IMPORT_ERROR}")
 
-    env = SupportDeskEnv()
-    obs = env.reset(task_id=task_id)
+    try:
+        from environment import SupportDeskEnv
+        from models import SupportAction
+    except Exception as e:
+        return _error_result(task_id, f"Environment import failed: {e}")
 
-    messages = [
+    try:
+        env = SupportDeskEnv()
+        obs = env.reset(task_id=task_id)
+    except Exception as e:
+        return _error_result(task_id, f"Environment setup failed: {e}")
+
+    try:
+        client = OpenAI(
+            base_url=API_BASE_URL,
+            api_key=HF_TOKEN,
+        )
+    except Exception as e:
+        return _error_result(task_id, f"Client initialization failed: {e}")
+
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
                 f"Task: {task_id}\n\n"
                 f"Ticket thread:\n{_format_thread(obs.ticket_thread)}\n\n"
-                f"Take your first action."
+                "Take your first action."
             ),
         },
     ]
 
     step_count = 0
-    while not obs.done:
-        response = client.chat.completions.create(
-            model=model_name or "gpt-4o-mini",
-            messages=messages,
-            temperature=0,
-            max_tokens=500,
-        )
-        reply_text = response.choices[0].message.content.strip()
+    max_steps = 12
 
-        # Parse the action JSON
+    while not obs.done and step_count < max_steps:
+        print("STEP: calling model")
         try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0,
+                max_tokens=500,
+            )
+        except Exception as e:
+            print("STEP: error occurred")
+            return {
+                "status": "error",
+                "task_id": task_id,
+                "model": MODEL_NAME,
+                "message": str(e),
+                "score": float(getattr(obs, "reward", 0.0) or 0.0),
+                "steps": step_count,
+                "grade": None,
+            }
+
+        reply_text = ""
+        try:
+            content = response.choices[0].message.content
+            reply_text = (content or "").strip()
             action_dict = _extract_json(reply_text)
             action = SupportAction(**action_dict)
         except Exception as e:
-            messages.append({"role": "assistant", "content": reply_text})
+            messages.append({"role": "assistant", "content": reply_text or "{}"})
             messages.append(
                 {
                     "role": "user",
                     "content": f"Invalid action: {e}. Respond with valid JSON only.",
                 }
             )
+            step_count += 1
             continue
 
-        obs = env.step(action)
+        try:
+            obs = env.step(action)
+        except Exception as e:
+            return _error_result(task_id, f"Environment step failed: {e}")
+
         step_count += 1
-
-        # Feed observation back
         messages.append({"role": "assistant", "content": reply_text})
-        messages.append(
-            {
-                "role": "user",
-                "content": _format_observation(obs, step_count),
-            }
-        )
+        messages.append({"role": "user", "content": _format_observation(obs, step_count)})
 
-    grade = env.get_grade_breakdown()
+    try:
+        grade = env.get_grade_breakdown()
+    except Exception:
+        grade = None
+
     return {
+        "status": "ok",
         "task_id": task_id,
-        "model": model_name,
-        "score": obs.reward,
+        "model": MODEL_NAME,
+        "score": float(getattr(obs, "reward", 0.0) or 0.0),
         "steps": step_count,
         "grade": grade,
     }
 
 
-def _format_thread(thread: list[dict]) -> str:
-    parts = []
-    for msg in thread:
-        parts.append(
-            f"[{msg['role'].upper()}] {msg.get('sender', 'System')}: {msg['message']}"
-        )
-    return "\n\n".join(parts)
-
-
-def _format_observation(obs: Any, step: int) -> str:
-    lines = [f"Step {step}: {obs.status_message}"]
-    if obs.latest_tool_result:
-        lines.append(
-            f"Tool result: {json.dumps(obs.latest_tool_result, indent=2)[:1000]}"
-        )
-    if obs.retrieved_artifacts:
-        lines.append(f"Retrieved: {', '.join(obs.retrieved_artifacts)}")
-    if obs.current_classification:
-        lines.append(f"Classification: {obs.current_classification}")
-    if obs.current_priority:
-        lines.append(f"Priority: {obs.current_priority}")
-    if obs.current_route:
-        lines.append(f"Route: {obs.current_route}")
-    return "\n".join(lines)
-
-
-def _extract_json(text: str) -> dict:
-    """Extract a JSON object from text, handling markdown code blocks."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
-    return json.loads(text)
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inference baseline for SupportDeskEnv")
-    parser.add_argument("--task", default=None, help="Run a single task (default: all)")
-    args = parser.parse_args()
+    print("START")
+    print("STEP: calling model")
+    summary: dict[str, Any]
 
-    tasks = [args.task] if args.task else TASK_IDS
-    results = []
+    try:
+        parser = argparse.ArgumentParser(description="Inference baseline for SupportDeskEnv")
+        parser.add_argument("--task", default=None, help="Run a single task (default: all)")
+        args = parser.parse_args()
 
-    for task_id in tasks:
-        print(f"\n{'=' * 60}")
-        print(f"Running task: {task_id}")
-        print(f"{'=' * 60}")
-        result = run_baseline(task_id=task_id)
-        results.append(result)
-        print(f"Score: {result['score']:.4f} ({result['steps']} steps)")
+        if args.task:
+            tasks = [args.task]
+        else:
+            try:
+                from fixtures import TASK_IDS
 
-    mean = sum(r["score"] for r in results) / len(results)
-    print(f"\n{'=' * 60}")
-    print(f"Mean score: {mean:.4f}")
-    print(f"Model: {results[0]['model']}")
-    print(f"{'=' * 60}")
+                tasks = list(TASK_IDS)
+            except Exception:
+                tasks = list(DEFAULT_TASK_IDS)
+        results: list[dict[str, Any]] = []
 
-    # Output JSON summary
-    summary = {
-        "model": results[0]["model"],
-        "prompt_version": "v1",
-        "tasks": [{"task_id": r["task_id"], "score": r["score"]} for r in results],
-        "mean_score": round(mean, 4),
-    }
+        for task_id in tasks:
+            result = run_baseline(task_id=task_id)
+            results.append(result)
+
+        task_scores = [{"task_id": r.get("task_id"), "score": r.get("score", 0.0)} for r in results]
+        mean_score = sum(float(r.get("score", 0.0) or 0.0) for r in results) / len(results)
+        summary = {
+            "status": "ok",
+            "model": MODEL_NAME,
+            "prompt_version": "v1",
+            "tasks": task_scores,
+            "mean_score": round(mean_score, 4),
+            "results": results,
+        }
+    except Exception as e:
+        print("STEP: error occurred")
+        summary = {
+            "status": "error",
+            "model": MODEL_NAME,
+            "message": str(e),
+            "tasks": [],
+            "mean_score": 0.0,
+            "results": [],
+        }
+    finally:
+        print("END")
+
     print(json.dumps(summary, indent=2))
 
 
