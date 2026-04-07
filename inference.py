@@ -137,7 +137,7 @@ def run_baseline(task_id: str = "access_reset") -> dict[str, Any]:
     max_steps = 12
 
     while not obs.done and step_count < max_steps:
-        print("STEP: calling model")
+        print(f"[STEP] task={task_id} step={step_count + 1} action=calling_model", flush=True)
         try:
             response = client.chat.completions.create(
                 model=MODEL_NAME,
@@ -146,7 +146,10 @@ def run_baseline(task_id: str = "access_reset") -> dict[str, Any]:
                 max_tokens=500,
             )
         except Exception as e:
-            print("STEP: error occurred")
+            print(
+                f"[STEP] task={task_id} step={step_count + 1} action=error message={str(e).replace(' ', '_')}",
+                flush=True,
+            )
             return {
                 "status": "error",
                 "task_id": task_id,
@@ -199,8 +202,7 @@ def run_baseline(task_id: str = "access_reset") -> dict[str, Any]:
 
 
 def main() -> None:
-    print("START")
-    print("STEP: calling model")
+    print(f"[START] model={MODEL_NAME}", flush=True)
     summary: dict[str, Any]
 
     try:
@@ -220,6 +222,7 @@ def main() -> None:
         results: list[dict[str, Any]] = []
 
         for task_id in tasks:
+            print(f"[STEP] task={task_id} action=run_baseline", flush=True)
             result = run_baseline(task_id=task_id)
             results.append(result)
 
@@ -244,7 +247,9 @@ def main() -> None:
             "results": [],
         }
     finally:
-        print("END")
+        final_score = summary.get("mean_score", 0.0) if isinstance(summary, dict) else 0.0
+        task_count = len(summary.get("tasks", [])) if isinstance(summary, dict) else 0
+        print(f"[END] tasks={task_count} score={final_score}", flush=True)
 
     print(json.dumps(summary, indent=2))
 
